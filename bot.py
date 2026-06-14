@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 import os
@@ -13,8 +13,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 db = Database()
 
 # ── Role IDs ───────────────────────────────────────────────
-HOST_ROLE_ID     = 1515755045214224424
-VERIFIED_ROLE_ID = None  # set if you add a Verified Player role ID
+HOST_ROLE_ID         = 1515755045214224424
+VERIFIED_ROLE_ID     = None
+LEADERBOARD_CHANNEL_ID = 1515424053215891556
+leaderboard_message_id  = None  # stored after first post
 
 RANK_ROLE_IDS = {
     "👑 Legend":   1515424826217598997,
@@ -75,6 +77,48 @@ async def assign_rank_role(member: discord.Member, rank_name: str):
     except Exception as e:
         print(f"Role assign error: {e}")
 
+
+# ── Auto leaderboard ───────────────────────────────────────
+async def build_leaderboard_embed():
+    top = db.get_leaderboard(10)
+    medals = ["🥇", "🥈", "🥉"]
+    if not top:
+        desc = "No players registered yet. Be the first with `/register`!"
+    else:
+        desc = ""
+        for i, p in enumerate(top):
+            rank_name, _ = get_rank(p["elo"])
+            medal = medals[i] if i < 3 else f"`#{i+1}`"
+            desc += f"{medal} **{p['ign']}** — {p['elo']} Elo  {rank_name}  ({p['wins']}W/{p['losses']}L)\n"
+    e = discord.Embed(title="🏆 SSM Ranked Leaderboard", description=desc, color=0xFFD700)
+    e.set_footer(text="SSM Ranked • Updates every 5 minutes")
+    return e
+
+@tasks.loop(minutes=5)
+async def update_leaderboard():
+    global leaderboard_message_id
+    channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    if not channel:
+        return
+    embed = await build_leaderboard_embed()
+    try:
+        if leaderboard_message_id:
+            msg = await channel.fetch_message(leaderboard_message_id)
+            await msg.edit(embed=embed)
+        else:
+            # Clear old messages and post fresh
+            await channel.purge(limit=10)
+            msg = await channel.send(embed=embed)
+            leaderboard_message_id = msg.id
+    except Exception as ex:
+        print(f"Leaderboard update error: {ex}")
+        try:
+            await channel.purge(limit=10)
+            msg = await channel.send(embed=embed)
+            leaderboard_message_id = msg.id
+        except:
+            pass
+
 # ── Welcome system ─────────────────────────────────────────
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -106,6 +150,7 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} | Servers: {len(bot.guilds)}")
     print(f"📢 MATCH_CHANNEL_ID = {get_match_channel_id()}")
     print(f"📢 RESULTS_CHANNEL_ID = {get_results_channel_id()}")
+    update_leaderboard.start()
 
 # ── /register ──────────────────────────────────────────────
 @bot.tree.command(name="register", description="Link your Minecraft IGN to start playing ranked.")
