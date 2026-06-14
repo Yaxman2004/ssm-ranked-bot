@@ -13,9 +13,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 db = Database()
 
 # ── Config ─────────────────────────────────────────────────
-MATCH_CHANNEL_ID   = int(os.getenv("MATCH_CHANNEL_ID",   "0"))
-RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "0"))
-HOST_ROLE_NAME     = "🎮 Match Host"
+HOST_ROLE_NAME = "🎮 Match Host"
+
+def get_match_channel_id():
+    val = os.getenv("MATCH_CHANNEL_ID", "0").strip()
+    return int(val) if val.isdigit() else 0
+
+def get_results_channel_id():
+    val = os.getenv("RESULTS_CHANNEL_ID", "0").strip()
+    return int(val) if val.isdigit() else 0
 
 # ── Rank thresholds ────────────────────────────────────────
 RANKS = [
@@ -101,6 +107,8 @@ async def on_ready():
     await bot.tree.sync()
     await bot.change_presence(activity=discord.Game("Super Smash Mobs | /queue"))
     print(f"✅ Logged in as {bot.user} | Servers: {len(bot.guilds)}")
+    print(f"📢 MATCH_CHANNEL_ID = {get_match_channel_id()}")
+    print(f"📢 RESULTS_CHANNEL_ID = {get_results_channel_id()}")
 
 # ── /register ──────────────────────────────────────────────
 @bot.tree.command(name="register", description="Link your Minecraft IGN to start playing ranked.")
@@ -170,7 +178,7 @@ async def queue_cmd(interaction: discord.Interaction):
         p2 = db.get_player(p2_id)
         match_id = db.create_match(p1_id, p2_id)
 
-        match_channel = bot.get_channel(MATCH_CHANNEL_ID) if MATCH_CHANNEL_ID != 0 else None
+        mid = get_match_channel_id(); match_channel = bot.get_channel(mid) if mid != 0 else None
 
         e = discord.Embed(title="⚔️ Match Found!", color=0x00FF88)
         e.add_field(
@@ -416,7 +424,7 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
         )
         e.set_footer(text=f"Match #{match['id']} • Best of 3 • SSM Ranked")
 
-        results_channel = bot.get_channel(RESULTS_CHANNEL_ID) if RESULTS_CHANNEL_ID != 0 else None
+        rid = get_results_channel_id(); results_channel = bot.get_channel(rid) if rid != 0 else None
         if results_channel:
             await results_channel.send(embed=e)
         await interaction.followup.send(embed=e)
