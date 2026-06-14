@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import asyncio
 import os
-from database import Database
+from database import Database, init_db
 
 intents = discord.Intents.default()
 intents.members = True
@@ -80,7 +80,7 @@ async def assign_rank_role(member: discord.Member, rank_name: str):
 
 # ── Auto leaderboard ───────────────────────────────────────
 async def build_leaderboard_embed():
-    top = db.get_leaderboard(10)
+    top = await db.get_leaderboard(10)
     medals = ["🥇", "🥈", "🥉"]
     if not top:
         desc = "No players registered yet. Be the first with `/register`!"
@@ -145,6 +145,7 @@ async def on_member_join(member: discord.Member):
 # ── Startup ────────────────────────────────────────────────
 @bot.event
 async def on_ready():
+    await init_db()
     await bot.tree.sync()
     await bot.change_presence(activity=discord.Game("Super Smash Mobs | /queue"))
     print(f"✅ Logged in as {bot.user} | Servers: {len(bot.guilds)}")
@@ -157,20 +158,20 @@ async def on_ready():
 @app_commands.describe(ign="Your Minecraft username (case-sensitive)")
 async def register(interaction: discord.Interaction, ign: str):
     uid = interaction.user.id
-    if db.get_player(uid):
+    if await db.get_player(uid):
         await interaction.response.send_message(
-            embed=elo_embed("Already Registered", f"You're already registered as **{db.get_player(uid)['ign']}**.\nUse `/profile` to see your stats.", 0xFF6B6B),
+            embed=elo_embed("Already Registered", f"You're already registered as **{await db.get_player(uid)['ign']}**.\nUse `/profile` to see your stats.", 0xFF6B6B),
             ephemeral=True
         )
         return
-    if db.ign_taken(ign):
+    if await db.ign_taken(ign):
         await interaction.response.send_message(
             embed=elo_embed("IGN Taken", f"**{ign}** is already registered to another account.", 0xFF6B6B),
             ephemeral=True
         )
         return
 
-    db.register(uid, ign)
+    await db.register(uid, ign)
     rank_name, rank_color = get_rank(1000)
 
     # Assign Gold role automatically
@@ -237,7 +238,7 @@ queue = {}
 async def queue_cmd(interaction: discord.Interaction):
     uid = interaction.user.id
     gid = interaction.guild_id
-    player = db.get_player(uid)
+    player = await db.get_player(uid)
 
     if not player:
         await interaction.response.send_message(
@@ -246,7 +247,7 @@ async def queue_cmd(interaction: discord.Interaction):
         )
         return
 
-    if db.in_active_match(uid):
+    if await db.in_active_match(uid):
         await interaction.response.send_message(
             embed=elo_embed("Already in Match", "You're already in an active match. Use `/forfeit` to forfeit.", 0xFF6B6B),
             ephemeral=True
@@ -271,9 +272,9 @@ async def queue_cmd(interaction: discord.Interaction):
     if len(queue[gid]) >= 2:
         p1_id, p1_elo = queue[gid].pop(0)
         p2_id, p2_elo = queue[gid].pop(0)
-        p1 = db.get_player(p1_id)
-        p2 = db.get_player(p2_id)
-        match_id = db.create_match(p1_id, p2_id)
+        p1 = await db.get_player(p1_id)
+        p2 = await db.get_player(p2_id)
+        match_id = await db.create_match(p1_id, p2_id)
 
         mid = get_match_channel_id()
         match_channel = bot.get_channel(mid) if mid != 0 else None
@@ -327,7 +328,7 @@ async def hostaccept(interaction: discord.Interaction, match_id: int):
         )
         return
 
-    match = db.get_match_by_id(match_id)
+    match = await db.get_match_by_id(match_id)
     if not match or match["status"] != "active":
         await interaction.response.send_message(
             embed=elo_embed("Match Not Found", f"No active match found with ID `#{match_id}`.", 0xFF6B6B),
@@ -335,8 +336,8 @@ async def hostaccept(interaction: discord.Interaction, match_id: int):
         )
         return
 
-    p1 = db.get_player(match["p1_id"])
-    p2 = db.get_player(match["p2_id"])
+    p1 = await db.get_player(match["p1_id"])
+    p2 = await db.get_player(match["p2_id"])
 
     e = discord.Embed(title="🎮 Host Confirmed!", color=0x00FF88)
     e.description = (
@@ -440,8 +441,8 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
         )
         return
 
-    winner = db.get_player(uid)
-    loser  = db.get_player(oid)
+    winner = await db.get_player(uid)
+    loser  = await db.get_player(oid)
 
     if not winner or not loser:
         await interaction.response.send_message(
@@ -450,7 +451,7 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
         )
         return
 
-    match = db.get_active_match(uid, oid)
+    match = await db.get_active_match(uid, oid)
     if not match:
         await interaction.response.send_message(
             embed=elo_embed("No Active Match", "No active match found between you two.", 0xFF6B6B),
@@ -483,7 +484,7 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
         new_w_elo, new_l_elo = calc_elo(winner["elo"], loser["elo"])
         w_gain = new_w_elo - winner["elo"]
         l_loss = new_l_elo - loser["elo"]
-        db.record_result(match["id"], uid, oid, new_w_elo, new_l_elo)
+        await db.record_result(match["id"], uid, oid, new_w_elo, new_l_elo)
 
         w_rank, w_color = get_rank(new_w_elo)
         l_rank, _       = get_rank(new_l_elo)
@@ -550,7 +551,7 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
 @bot.tree.command(name="forfeit", description="Forfeit your current match.")
 async def forfeit(interaction: discord.Interaction):
     uid = interaction.user.id
-    match = db.get_active_match_single(uid)
+    match = await db.get_active_match_single(uid)
     if not match:
         await interaction.response.send_message(
             embed=elo_embed("No Active Match", "You don't have an active match.", 0xFF6B6B),
@@ -559,12 +560,12 @@ async def forfeit(interaction: discord.Interaction):
         return
 
     opp_id = match["p2_id"] if match["p1_id"] == uid else match["p1_id"]
-    loser   = db.get_player(uid)
-    winner  = db.get_player(opp_id)
+    loser   = await db.get_player(uid)
+    winner  = await db.get_player(opp_id)
     new_w_elo, new_l_elo = calc_elo(winner["elo"], loser["elo"])
     w_gain = new_w_elo - winner["elo"]
     l_loss = new_l_elo - loser["elo"]
-    db.record_result(match["id"], opp_id, uid, new_w_elo, new_l_elo)
+    await db.record_result(match["id"], opp_id, uid, new_w_elo, new_l_elo)
 
     # Update rank roles
     w_rank, _ = get_rank(new_w_elo)
@@ -589,7 +590,7 @@ async def forfeit(interaction: discord.Interaction):
 @app_commands.describe(user="Leave blank to see your own profile")
 async def profile(interaction: discord.Interaction, user: discord.Member = None):
     target = user or interaction.user
-    player = db.get_player(target.id)
+    player = await db.get_player(target.id)
     if not player:
         await interaction.response.send_message(
             embed=elo_embed("Not Found", f"{'That player is' if user else 'You are'} not registered.", 0xFF6B6B),
@@ -617,7 +618,7 @@ async def profile(interaction: discord.Interaction, user: discord.Member = None)
 # ── /leaderboard ───────────────────────────────────────────
 @bot.tree.command(name="leaderboard", description="View the top 10 ranked players.")
 async def leaderboard(interaction: discord.Interaction):
-    top = db.get_leaderboard()
+    top = await db.get_leaderboard()
     if not top:
         await interaction.response.send_message(
             embed=elo_embed("No Players Yet", "Nobody is registered yet. Be the first with `/register`!"),
@@ -641,7 +642,7 @@ async def leaderboard(interaction: discord.Interaction):
 @app_commands.describe(user="Leave blank for your own history")
 async def history(interaction: discord.Interaction, user: discord.Member = None):
     target = user or interaction.user
-    player = db.get_player(target.id)
+    player = await db.get_player(target.id)
     if not player:
         await interaction.response.send_message(
             embed=elo_embed("Not Found", "That player is not registered.", 0xFF6B6B),
@@ -649,7 +650,7 @@ async def history(interaction: discord.Interaction, user: discord.Member = None)
         )
         return
 
-    matches = db.get_history(target.id)
+    matches = await db.get_history(target.id)
     if not matches:
         await interaction.response.send_message(
             embed=elo_embed("No Matches", "No matches played yet."),
@@ -675,11 +676,11 @@ async def history(interaction: discord.Interaction, user: discord.Member = None)
 @app_commands.describe(user="The player to adjust", elo="New Elo value")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setelo(interaction: discord.Interaction, user: discord.Member, elo: int):
-    player = db.get_player(user.id)
+    player = await db.get_player(user.id)
     if not player:
         await interaction.response.send_message(embed=elo_embed("Not Found", "That player is not registered.", 0xFF6B6B), ephemeral=True)
         return
-    db.set_elo(user.id, elo)
+    await db.set_elo(user.id, elo)
     rank_name, _ = get_rank(elo)
     await assign_rank_role(user, rank_name)
     await interaction.response.send_message(
@@ -691,17 +692,17 @@ async def setelo(interaction: discord.Interaction, user: discord.Member, elo: in
 @app_commands.describe(winner="The winning player", loser="The losing player")
 @app_commands.checks.has_permissions(manage_guild=True)
 async def forcewinner(interaction: discord.Interaction, winner: discord.Member, loser: discord.Member):
-    w = db.get_player(winner.id)
-    l = db.get_player(loser.id)
+    w = await db.get_player(winner.id)
+    l = await db.get_player(loser.id)
     if not w or not l:
         await interaction.response.send_message(embed=elo_embed("Not Found", "Both players must be registered.", 0xFF6B6B), ephemeral=True)
         return
-    match = db.get_active_match(winner.id, loser.id)
+    match = await db.get_active_match(winner.id, loser.id)
     if not match:
-        mid = db.create_match(winner.id, loser.id)
+        mid = await db.create_match(winner.id, loser.id)
         match = {"id": mid}
     new_w, new_l = calc_elo(w["elo"], l["elo"])
-    db.record_result(match["id"], winner.id, loser.id, new_w, new_l)
+    await db.record_result(match["id"], winner.id, loser.id, new_w, new_l)
     w_rank, _ = get_rank(new_w)
     l_rank, _ = get_rank(new_l)
     await assign_rank_role(winner, w_rank)
