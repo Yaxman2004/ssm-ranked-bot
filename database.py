@@ -1,4 +1,4 @@
-import aiopg
+import psycopg
 import os
 
 _pool = None
@@ -6,72 +6,63 @@ _pool = None
 async def get_pool():
     global _pool
     if _pool is None:
-        _pool = await aiopg.create_pool(os.getenv("DATABASE_URL"))
+        _pool = await psycopg.AsyncConnection.connect(os.getenv("DATABASE_URL"))
     return _pool
 
 async def init_db():
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as c:
-            await c.execute("""
-                CREATE TABLE IF NOT EXISTS players (
-                    discord_id   BIGINT PRIMARY KEY,
-                    ign          TEXT UNIQUE NOT NULL,
-                    elo          INTEGER DEFAULT 1000,
-                    wins         INTEGER DEFAULT 0,
-                    losses       INTEGER DEFAULT 0,
-                    streak       INTEGER DEFAULT 0,
-                    registered_at TIMESTAMP DEFAULT NOW()
-                );
-                CREATE TABLE IF NOT EXISTS matches (
-                    id                  SERIAL PRIMARY KEY,
-                    p1_id               BIGINT NOT NULL,
-                    p2_id               BIGINT NOT NULL,
-                    winner_id           BIGINT,
-                    loser_id            BIGINT,
-                    winner_elo_before   INTEGER,
-                    loser_elo_before    INTEGER,
-                    winner_elo_after    INTEGER,
-                    loser_elo_after     INTEGER,
-                    status              TEXT DEFAULT 'active',
-                    created_at          TIMESTAMP DEFAULT NOW(),
-                    finished_at         TIMESTAMP
-                );
-            """)
+    conn = await get_pool()
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS players (
+            discord_id   BIGINT PRIMARY KEY,
+            ign          TEXT UNIQUE NOT NULL,
+            elo          INTEGER DEFAULT 1000,
+            wins         INTEGER DEFAULT 0,
+            losses       INTEGER DEFAULT 0,
+            streak       INTEGER DEFAULT 0,
+            registered_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS matches (
+            id                  SERIAL PRIMARY KEY,
+            p1_id               BIGINT NOT NULL,
+            p2_id               BIGINT NOT NULL,
+            winner_id           BIGINT,
+            loser_id            BIGINT,
+            winner_elo_before   INTEGER,
+            loser_elo_before    INTEGER,
+            winner_elo_after    INTEGER,
+            loser_elo_after     INTEGER,
+            status              TEXT DEFAULT 'active',
+            created_at          TIMESTAMP DEFAULT NOW(),
+            finished_at         TIMESTAMP
+        )
+    """)
+    await conn.commit()
 
 async def fetchone(query, *args):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as c:
-            await c.execute(query, args)
-            row = await c.fetchone()
-            if row is None:
-                return None
-            cols = [d[0] for d in c.description]
-            return dict(zip(cols, row))
+    conn = await get_pool()
+    async with conn.cursor(row_factory=psycopg.rows.dict_row) as c:
+        await c.execute(query, args)
+        return await c.fetchone()
 
 async def fetchall(query, *args):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as c:
-            await c.execute(query, args)
-            rows = await c.fetchall()
-            cols = [d[0] for d in c.description]
-            return [dict(zip(cols, r)) for r in rows]
+    conn = await get_pool()
+    async with conn.cursor(row_factory=psycopg.rows.dict_row) as c:
+        await c.execute(query, args)
+        return await c.fetchall()
 
 async def execute(query, *args):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as c:
-            await c.execute(query, args)
+    conn = await get_pool()
+    await conn.execute(query, args)
+    await conn.commit()
 
 async def fetchval(query, *args):
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.cursor() as c:
-            await c.execute(query, args)
-            row = await c.fetchone()
-            return row[0] if row else None
+    conn = await get_pool()
+    async with conn.cursor() as c:
+        await c.execute(query, args)
+        row = await c.fetchone()
+        return row[0] if row else None
 
 class Database:
     async def get_player(self, discord_id):
