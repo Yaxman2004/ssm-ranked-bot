@@ -12,6 +12,13 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 db = Database()
 
+# ── Config ─────────────────────────────────────────────────
+# Set these channel IDs after you create them in Discord
+# Right click channel → Copy Channel ID (need developer mode on)
+MATCH_CHANNEL_ID   = int(os.getenv("MATCH_CHANNEL_ID",   "0"))
+RESULTS_CHANNEL_ID = int(os.getenv("RESULTS_CHANNEL_ID", "0"))
+HOST_ROLE_NAME     = "🎮 Match Host"
+
 # ── Rank thresholds ────────────────────────────────────────
 RANKS = [
     (1600, "👑 Legend",   0x8B0000),
@@ -96,7 +103,6 @@ async def queue_cmd(interaction: discord.Interaction):
     if gid not in queue:
         queue[gid] = []
 
-    # Check if already in queue
     if any(u == uid for u, _ in queue[gid]):
         await interaction.response.send_message(
             embed=elo_embed("Already Queuing", "You're already in the queue! Use `/leavequeue` to leave.", 0xFFD700),
@@ -109,7 +115,7 @@ async def queue_cmd(interaction: discord.Interaction):
         embed=elo_embed("🔍 Searching for Match...", f"**{player['ign']}** ({player['elo']} Elo) has entered the queue.\nPlayers in queue: **{len(queue[gid])}**", 0x6c3bff)
     )
 
-    # Match found
+    # Match found — need 2 players
     if len(queue[gid]) >= 2:
         p1_id, p1_elo = queue[gid].pop(0)
         p2_id, p2_elo = queue[gid].pop(0)
@@ -117,14 +123,48 @@ async def queue_cmd(interaction: discord.Interaction):
         p2 = db.get_player(p2_id)
         match_id = db.create_match(p1_id, p2_id)
 
+        # Find the host role
+        host_role = discord.utils.get(interaction.guild.roles, name=HOST_ROLE_NAME)
+        host_ping = host_role.mention if host_role else "**@Match Host**"
+
+        # Post in active-matches channel if configured
+        match_channel = bot.get_channel(MATCH_CHANNEL_ID) if MATCH_CHANNEL_ID != 0 else None
+
         e = discord.Embed(title="⚔️ Match Found!", color=0x00FF88)
-        e.add_field(name="Player 1", value=f"<@{p1_id}>\n**{p1['ign']}** • {p1_elo} Elo", inline=True)
-        e.add_field(name="vs", value="⚔️", inline=True)
-        e.add_field(name="Player 2", value=f"<@{p2_id}>\n**{p2['ign']}** • {p2_elo} Elo", inline=True)
-        e.add_field(name="How to play", value="Join **mineplex.com**, go to Super Smash Mobs and challenge your opponent!\nWhen done, the **winner** types `/win @loser`.", inline=False)
-        e.add_field(name="Match ID", value=f"`#{match_id}`", inline=False)
-        e.set_footer(text="SSM Ranked • You have 10 minutes to start your match.")
-        await interaction.followup.send(content=f"<@{p1_id}> <@{p2_id}>", embed=e)
+        e.add_field(
+            name="Player 1",
+            value=f"<@{p1_id}>\n**{p1['ign']}** • {p1_elo} Elo",
+            inline=True
+        )
+        e.add_field(name="VS", value="⚔️", inline=True)
+        e.add_field(
+            name="Player 2",
+            value=f"<@{p2_id}>\n**{p2['ign']}** • {p2_elo} Elo",
+            inline=True
+        )
+        e.add_field(
+            name="📋 Format",
+            value="**Best of 3** — First to 2 wins\nYou may switch kits between games",
+            inline=False
+        )
+        e.add_field(
+            name="🎮 Need a Host?",
+            value=f"A Celestial/Divine rank player is needed to host the MPS lobby.\n{host_ping} — can you host this match?",
+            inline=False
+        )
+        e.add_field(
+            name="✅ When Done",
+            value="Winner runs `/win @opponent` to report the result.",
+            inline=False
+        )
+        e.set_footer(text=f"Match #{match_id} • SSM Ranked • Players have 15 minutes to start")
+
+        content = f"<@{p1_id}> <@{p2_id}> {host_ping}"
+
+        if match_channel:
+            await match_channel.send(content=content, embed=e)
+        else:
+            await interaction.followup.send(content=content, embed=e)
 
 # ── /leavequeue ────────────────────────────────────────────
 @bot.tree.command(name="leavequeue", description="Leave the ranked queue.")
@@ -143,10 +183,119 @@ async def leavequeue(interaction: discord.Interaction):
             ephemeral=True
         )
 
-# ── /win ───────────────────────────────────────────────────
-pending_confirms = {}  # match_id -> {winner, loser, confirmed: False}
+# ── /hostaccept ────────────────────────────────────────────
+@bot.tree.command(name="hostaccept", description="Accept hosting a match. Match Hosts only.")
+@app_commands.describe(match_id="The match ID shown in the match announcement")
+async def hostaccept(interaction: discord.Interaction, match_id: int):
+    host_role = discord.utils.get(interaction.guild.roles, name=HOST_ROLE_NAME)
+    if host_role not in interaction.user.roles:
+        await interaction.response.send_message(
+            embed=elo_embed("No Permission", f"Only players with the **{HOST_ROLE_NAME}** role can use this command.", 0xFF6B6B),
+            ephemeral=True
+        )
+        return
 
-@bot.tree.command(name="win", description="Report yourself as the winner of your match.")
+    match = db.get_match_by_id(match_id)
+    if not match or match["status"] != "active":
+        await interaction.response.send_message(
+            embed=elo_embed("Match Not Found", f"No active match found with ID `#{match_id}`.", 0xFF6B6B),
+            ephemeral=True
+        )
+        return
+
+    p1 = db.get_player(match["p1_id"])
+    p2 = db.get_player(match["p2_id"])
+
+    e = discord.Embed(title="🎮 Host Confirmed!", color=0x00FF88)
+    e.description = (
+        f"**{interaction.user.display_name}** is hosting match `#{match_id}`!\n\n"
+        f"<@{match['p1_id']}> (**{p1['ign']}**) and <@{match['p2_id']}> (**{p2['ign']}**) — "
+        f"join **{interaction.user.display_name}**'s MPS lobby on Mineplex now!\n\n"
+        f"**Format:** Best of 3 — First to 2 wins\n"
+        f"**Kit switching** is allowed between games."
+    )
+    e.set_footer(text=f"Match #{match_id} • SSM Ranked")
+    await interaction.response.send_message(content=f"<@{match['p1_id']}> <@{match['p2_id']}>", embed=e)
+
+# ── /applyhost ─────────────────────────────────────────────
+@bot.tree.command(name="applyhost", description="Apply to become a Match Host (requires Celestial or Divine rank on Mineplex).")
+@app_commands.describe(ign="Your Minecraft IGN", rank="Your Mineplex rank (Celestial or Divine)")
+@app_commands.choices(rank=[
+    app_commands.Choice(name="Celestial", value="Celestial"),
+    app_commands.Choice(name="Divine",    value="Divine"),
+])
+async def applyhost(interaction: discord.Interaction, ign: str, rank: str):
+    # Post application to staff channel
+    staff_channel = None
+    for ch in interaction.guild.text_channels:
+        if "staff-chat" in ch.name or "mod-logs" in ch.name:
+            staff_channel = ch
+            break
+
+    e = discord.Embed(title="🎮 New Host Application", color=0x6c3bff)
+    e.add_field(name="Discord",   value=f"<@{interaction.user.id}>", inline=True)
+    e.add_field(name="IGN",       value=ign,                          inline=True)
+    e.add_field(name="MP Rank",   value=rank,                         inline=True)
+    e.set_footer(text="Use /approvehost or /denyhost to respond")
+
+    if staff_channel:
+        await staff_channel.send(embed=e)
+        await interaction.response.send_message(
+            embed=elo_embed("Application Sent!", f"Your host application has been sent to staff.\nWe'll review it and get back to you soon!", 0x00FF88),
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            embed=elo_embed("Application Received", "Your application was received but no staff channel was found. Please contact a staff member directly.", 0xFFD700),
+            ephemeral=True
+        )
+
+# ── /approvehost (staff only) ──────────────────────────────
+@bot.tree.command(name="approvehost", description="[Staff] Approve a player's Match Host application.")
+@app_commands.describe(user="The player to approve as a Match Host")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def approvehost(interaction: discord.Interaction, user: discord.Member):
+    host_role = discord.utils.get(interaction.guild.roles, name=HOST_ROLE_NAME)
+    if not host_role:
+        await interaction.response.send_message(
+            embed=elo_embed("Role Not Found", f"The **{HOST_ROLE_NAME}** role doesn't exist. Please create it first.", 0xFF6B6B),
+            ephemeral=True
+        )
+        return
+    await user.add_roles(host_role)
+    await interaction.response.send_message(
+        embed=elo_embed("✅ Host Approved", f"<@{user.id}> has been given the **{HOST_ROLE_NAME}** role!", 0x00FF88)
+    )
+    try:
+        await user.send(embed=elo_embed(
+            "🎮 Host Application Approved!",
+            f"Congrats! You're now a **Match Host** in SSM Ranked.\n\n"
+            f"When a match is found you'll be pinged. Use `/hostaccept <match_id>` to claim the match and host the MPS lobby.\n\n"
+            f"Thank you for supporting the community! 🙏",
+            0x00FF88
+        ))
+    except:
+        pass
+
+# ── /denyhost (staff only) ────────────────────────────────
+@bot.tree.command(name="denyhost", description="[Staff] Deny a player's Match Host application.")
+@app_commands.describe(user="The player to deny", reason="Reason for denial")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def denyhost(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+    await interaction.response.send_message(
+        embed=elo_embed("❌ Application Denied", f"<@{user.id}>'s host application has been denied.\nReason: {reason}", 0xFF6B6B)
+    )
+    try:
+        await user.send(embed=elo_embed(
+            "Host Application Update",
+            f"Unfortunately your Match Host application was not approved at this time.\n**Reason:** {reason}\n\nYou're welcome to reapply in the future!",
+            0xFF6B6B
+        ))
+    except:
+        pass
+
+# ── /win ───────────────────────────────────────────────────
+@bot.tree.command(name="win", description="Report yourself as the winner of your Best of 3 match.")
 @app_commands.describe(opponent="The player you just beat")
 async def win(interaction: discord.Interaction, opponent: discord.Member):
     uid = interaction.user.id
@@ -172,18 +321,16 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
     match = db.get_active_match(uid, oid)
     if not match:
         await interaction.response.send_message(
-            embed=elo_embed("No Active Match", "No active match found between you two. Make sure you're both in a match together.", 0xFF6B6B),
+            embed=elo_embed("No Active Match", "No active match found between you two.", 0xFF6B6B),
             ephemeral=True
         )
         return
 
-    # Store pending confirm
-    pending_confirms[match["id"]] = {"winner": uid, "loser": oid, "match": match}
-
     e = discord.Embed(title="⚠️ Confirm Result", color=0xFFD700)
     e.description = (
-        f"<@{oid}>, **{winner['ign']}** is reporting a win over you.\n\n"
-        f"React with ✅ to **confirm** or ❌ to **dispute**.\n"
+        f"<@{oid}>, **{winner['ign']}** is reporting a **2-0 or 2-1 win** over you.\n\n"
+        f"✅ = Confirm result\n"
+        f"❌ = Dispute result\n\n"
         f"*(You have 2 minutes to respond)*"
     )
     await interaction.response.send_message(content=f"<@{oid}>", embed=e)
@@ -198,16 +345,14 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
         reaction, user = await bot.wait_for("reaction_add", timeout=120.0, check=check)
     except asyncio.TimeoutError:
         await interaction.followup.send(
-            embed=elo_embed("Timed Out", f"<@{oid}> did not respond in time. Result has been flagged for staff review.", 0xFF6B6B)
+            embed=elo_embed("Timed Out", f"<@{oid}> did not respond. Result flagged for staff review.", 0xFF6B6B)
         )
         return
 
     if str(reaction.emoji) == "✅":
-        # Process result
         new_w_elo, new_l_elo = calc_elo(winner["elo"], loser["elo"])
         w_gain = new_w_elo - winner["elo"]
         l_loss = new_l_elo - loser["elo"]
-
         db.record_result(match["id"], uid, oid, new_w_elo, new_l_elo)
 
         w_rank, w_color = get_rank(new_w_elo)
@@ -224,12 +369,26 @@ async def win(interaction: discord.Interaction, opponent: discord.Member):
             value=f"**{loser['elo']} → {new_l_elo}** ({l_loss})\n{l_rank}",
             inline=True
         )
-        e.set_footer(text=f"Match #{match['id']} • SSM Ranked")
+        e.set_footer(text=f"Match #{match['id']} • Best of 3 • SSM Ranked")
+
+        results_channel = bot.get_channel(RESULTS_CHANNEL_ID) if RESULTS_CHANNEL_ID != 0 else None
+        if results_channel:
+            await results_channel.send(embed=e)
         await interaction.followup.send(embed=e)
 
     elif str(reaction.emoji) == "❌":
+        dispute_channel = None
+        for ch in interaction.guild.text_channels:
+            if "dispute" in ch.name:
+                dispute_channel = ch
+                break
+        dispute_mention = dispute_channel.mention if dispute_channel else "#🚨・disputes"
         await interaction.followup.send(
-            embed=elo_embed("⚠️ Result Disputed", f"<@{oid}> has disputed this result. A staff member will review match `#{match['id']}`.", 0xFF6B6B)
+            embed=elo_embed(
+                "⚠️ Result Disputed",
+                f"<@{oid}> has disputed this result.\nBoth players please head to {dispute_mention} and explain what happened.\nA staff member will review match `#{match['id']}`.",
+                0xFF6B6B
+            )
         )
 
 # ── /forfeit ───────────────────────────────────────────────
@@ -254,7 +413,7 @@ async def forfeit(interaction: discord.Interaction):
 
     e = discord.Embed(title="🏳️ Forfeit", color=0xFF6B6B)
     e.description = (
-        f"**{loser['ign']}** has forfeited.\n\n"
+        f"**{loser['ign']}** has forfeited match `#{match['id']}`.\n\n"
         f"🥇 **{winner['ign']}**: {winner['elo']} → **{new_w_elo}** (+{w_gain})\n"
         f"💀 **{loser['ign']}**: {loser['elo']} → **{new_l_elo}** ({l_loss})"
     )
@@ -281,12 +440,12 @@ async def profile(interaction: discord.Interaction, user: discord.Member = None)
 
     e = discord.Embed(title=f"{player['ign']}'s Profile", color=rank_color)
     e.set_thumbnail(url=f"https://mc-heads.net/avatar/{player['ign']}/64")
-    e.add_field(name="Rank",    value=rank_name,           inline=True)
-    e.add_field(name="Elo",     value=f"**{player['elo']}**", inline=True)
-    e.add_field(name="Streak",  value=streak_str,          inline=True)
-    e.add_field(name="Wins",    value=str(player["wins"]),  inline=True)
-    e.add_field(name="Losses",  value=str(player["losses"]),inline=True)
-    e.add_field(name="Win Rate",value=f"{wr}%",            inline=True)
+    e.add_field(name="Rank",     value=rank_name,              inline=True)
+    e.add_field(name="Elo",      value=f"**{player['elo']}**", inline=True)
+    e.add_field(name="Streak",   value=streak_str,             inline=True)
+    e.add_field(name="Wins",     value=str(player["wins"]),    inline=True)
+    e.add_field(name="Losses",   value=str(player["losses"]),  inline=True)
+    e.add_field(name="Win Rate", value=f"{wr}%",               inline=True)
     e.set_footer(text="SSM Ranked • mineplex.com")
     await interaction.response.send_message(embed=e)
 
@@ -372,8 +531,8 @@ async def forcewinner(interaction: discord.Interaction, winner: discord.Member, 
         return
     match = db.get_active_match(winner.id, loser.id)
     if not match:
-        match = db.create_match(winner.id, loser.id)
-        match = {"id": match}
+        mid = db.create_match(winner.id, loser.id)
+        match = {"id": mid}
     new_w, new_l = calc_elo(w["elo"], l["elo"])
     db.record_result(match["id"], winner.id, loser.id, new_w, new_l)
     await interaction.response.send_message(
@@ -382,9 +541,11 @@ async def forcewinner(interaction: discord.Interaction, winner: discord.Member, 
 
 @setelo.error
 @forcewinner.error
+@approvehost.error
+@denyhost.error
 async def staff_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message(embed=elo_embed("No Permission", "You need **Manage Server** permission to use this command.", 0xFF6B6B), ephemeral=True)
+        await interaction.response.send_message(embed=elo_embed("No Permission", "You need **Manage Server** permission to use this.", 0xFF6B6B), ephemeral=True)
 
 # ── Run ────────────────────────────────────────────────────
 bot.run(os.getenv("DISCORD_TOKEN"))
